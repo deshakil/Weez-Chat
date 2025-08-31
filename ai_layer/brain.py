@@ -84,7 +84,7 @@ def _extract_tool_schemas() -> List[Dict[str, Any]]:
         if not spec:
             logger.warning("Tool %s missing spec; skipping.", name)
             continue
-
+        
         # Convert the spec to the format expected by Azure OpenAI
         schema = {
             "type": "function",
@@ -166,10 +166,10 @@ class ReActBrain:
 
     #    # ReAct loop ----------------------------------------------------
     #    reply = self._react_loop(user_id=user_id, conversation_id=conversation_id, messages=messages, intent=intent)
-
+        
     #    # Store the complete conversation in memory
     #    self._store_conversation(user_id, conversation_id, user_input, reply)
-
+        
     #    return reply
 
     # ALSO FIX: The main reason_and_act method
@@ -258,13 +258,13 @@ class ReActBrain:
     #) -> List[Dict[str, Any]]:
     #    """Build conversation messages including system prompt and conversation history."""
     #    messages: List[Dict[str, Any]] = []
-
+        
     #    # Add system prompt
     #    messages.append({
     #        "role": "system",
     #        "content": self._system_prompt(intent=intent, embedding=embedding)
     #    })
-
+        
     #    # Get conversation history from Cosmos DB for this specific conversation
     #    try:
     #        history = self.memory_manager.get_conversation_history(
@@ -281,21 +281,21 @@ class ReActBrain:
     #                "role": "user",
     #                "content": conversation.get("user_query", "")
     #            })
-
+                
     #            # Add assistant response
     #            messages.append({
     #                "role": "assistant",
     #                "content": conversation.get("agent_response", "")
     #            })
-
+                
     #    except Exception as e:
     #        logger.error("Failed to retrieve conversation history: %s", e)
     #        logger.debug(traceback.format_exc())
     #        # Continue without history if retrieval fails
-
+        
     #    # Add current user message
     #    messages.append({"role": "user", "content": user_input})
-
+        
     #    return messages
     def _build_conversation_messages(
             self,
@@ -406,7 +406,7 @@ class ReActBrain:
         while steps < self.max_reasoning_steps:
             steps += 1
             logger.debug("ReAct step %s messages_len=%s", steps, len(messages))
-
+            
             try:
                 resp = self.client.chat.completions.create(
                     model=self.model,
@@ -430,30 +430,30 @@ class ReActBrain:
                     "role": "assistant",
                     "content": msg.content or None,
                     "tool_calls": [
-                        tc.model_dump() if hasattr(tc, "model_dump") else _tool_call_to_dict(tc)
+                        tc.model_dump() if hasattr(tc, "model_dump") else _tool_call_to_dict(tc) 
                         for tc in tool_calls
                     ],
                 })
 
                 # Execute each tool call sequentially
                 for tc in tool_calls:
-                    name = (getattr(tc.function, "name", None) if hasattr(tc, "function")
+                    name = (getattr(tc.function, "name", None) if hasattr(tc, "function") 
                            else tc.get("function", {}).get("name"))
-                    arg_str = (getattr(tc.function, "arguments", "{}") if hasattr(tc, "function")
+                    arg_str = (getattr(tc.function, "arguments", "{}") if hasattr(tc, "function") 
                               else tc.get("function", {}).get("arguments", "{}"))
                     args = self._safe_json_loads(arg_str)
 
                     logger.info("Executing tool %s with args: %s", name, args)
                     result = self._dispatch_tool(
-                        user_id=user_id,
+                        user_id=user_id, 
                         conversation_id=conversation_id,
-                        tool_name=name,
-                        args=args,
+                        tool_name=name, 
+                        args=args, 
                         intent=intent
                     )
 
                     # Append tool result message
-                    tool_call_id = (getattr(tc, "id", None) if hasattr(tc, "id")
+                    tool_call_id = (getattr(tc, "id", None) if hasattr(tc, "id") 
                                    else tc.get("id"))
                     messages.append({
                         "role": "tool",
@@ -461,7 +461,7 @@ class ReActBrain:
                         "name": name,
                         "content": json.dumps(result, ensure_ascii=False),
                     })
-
+                
                 # Continue loop to let model observe tool outputs
                 continue
 
@@ -474,7 +474,7 @@ class ReActBrain:
         logger.warning("ReActBrain reached max_reasoning_steps=%s; forcing finalization.", self.max_reasoning_steps)
         try:
             messages.append({
-                "role": "user",
+                "role": "user", 
                 "content": "Please provide your best final answer based on all tool results so far."
             })
             resp = self.client.chat.completions.create(
@@ -491,17 +491,17 @@ class ReActBrain:
     # ------------------------------------------------------------------
     # Tool dispatch + error safety
     def _dispatch_tool(
-    self,
-    user_id: str,
+    self, 
+    user_id: str, 
     conversation_id: str,
-    tool_name: Optional[str],
-    args: Dict[str, Any],
+    tool_name: Optional[str], 
+    args: Dict[str, Any], 
     intent: Dict[str, Any]
 ) -> Dict[str, Any]:
      """Execute a tool function with error handling."""
      if not tool_name:
         return {"success": False, "error": "Missing tool name."}
-
+    
      fn = self.tool_mapping.get(tool_name)
      if not fn:
         return {"success": False, "error": f"Unknown tool: {tool_name}"}
@@ -509,7 +509,7 @@ class ReActBrain:
     # CRITICAL FIX: Always override user_id from the authenticated user
     # The model may hallucinate or provide incorrect user_id values
      args["user_id"] = user_id  # Force override, don't check if it exists
-
+    
     # Log the override for debugging
      if "user_id" in args and args["user_id"] != user_id:
         logger.warning("Model provided incorrect user_id, overriding with authenticated user: %s", user_id)
@@ -533,18 +533,18 @@ class ReActBrain:
         result = fn(args)
         if result is None:
             result = {"message": "No results found."}
-
+        
         wrapped_result = {
-            "success": True,
-            "function": tool_name,
+            "success": True, 
+            "function": tool_name, 
             "result": result
         }
-
+        
         # Store tool result as a separate conversation entry for context
         self._store_tool_result(user_id, conversation_id, tool_name, result)
-
+        
         return wrapped_result
-
+        
      except TypeError as te:
         logger.warning("Tool %s arg mismatch: %s; retrying with minimal args.", tool_name, te)
         try:
@@ -555,8 +555,8 @@ class ReActBrain:
             }
             result = fn(minimal_args)
             wrapped_result = {
-                "success": True,
-                "function": tool_name,
+                "success": True, 
+                "function": tool_name, 
                 "result": result
             }
             self._store_tool_result(user_id, conversation_id, tool_name, result)
@@ -588,7 +588,7 @@ class ReActBrain:
             # Store as a system message for context using the same conversation_id
             # Generate a unique conversation_id for tool results to avoid confusion
             tool_conversation_id = f"{conversation_id}_tool_{tool_name}_{uuid.uuid4().hex[:8]}"
-
+            
             self.memory_manager.store_conversation(
                 user_id=user_id,
                 conversation_id=tool_conversation_id,
