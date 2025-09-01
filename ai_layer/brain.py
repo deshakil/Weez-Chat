@@ -84,7 +84,7 @@ def _extract_tool_schemas() -> List[Dict[str, Any]]:
         if not spec:
             logger.warning("Tool %s missing spec; skipping.", name)
             continue
-        
+
         # Convert the spec to the format expected by Azure OpenAI
         schema = {
             "type": "function",
@@ -166,10 +166,10 @@ class ReActBrain:
 
     #    # ReAct loop ----------------------------------------------------
     #    reply = self._react_loop(user_id=user_id, conversation_id=conversation_id, messages=messages, intent=intent)
-        
+
     #    # Store the complete conversation in memory
     #    self._store_conversation(user_id, conversation_id, user_input, reply)
-        
+
     #    return reply
 
     # ALSO FIX: The main reason_and_act method
@@ -258,13 +258,13 @@ class ReActBrain:
     #) -> List[Dict[str, Any]]:
     #    """Build conversation messages including system prompt and conversation history."""
     #    messages: List[Dict[str, Any]] = []
-        
+
     #    # Add system prompt
     #    messages.append({
     #        "role": "system",
     #        "content": self._system_prompt(intent=intent, embedding=embedding)
     #    })
-        
+
     #    # Get conversation history from Cosmos DB for this specific conversation
     #    try:
     #        history = self.memory_manager.get_conversation_history(
@@ -281,21 +281,21 @@ class ReActBrain:
     #                "role": "user",
     #                "content": conversation.get("user_query", "")
     #            })
-                
+
     #            # Add assistant response
     #            messages.append({
     #                "role": "assistant",
     #                "content": conversation.get("agent_response", "")
     #            })
-                
+
     #    except Exception as e:
     #        logger.error("Failed to retrieve conversation history: %s", e)
     #        logger.debug(traceback.format_exc())
     #        # Continue without history if retrieval fails
-        
+
     #    # Add current user message
     #    messages.append({"role": "user", "content": user_input})
-        
+
     #    return messages
     def _build_conversation_messages(
             self,
@@ -406,7 +406,7 @@ class ReActBrain:
         while steps < self.max_reasoning_steps:
             steps += 1
             logger.debug("ReAct step %s messages_len=%s", steps, len(messages))
-            
+
             try:
                 resp = self.client.chat.completions.create(
                     model=self.model,
@@ -430,30 +430,30 @@ class ReActBrain:
                     "role": "assistant",
                     "content": msg.content or None,
                     "tool_calls": [
-                        tc.model_dump() if hasattr(tc, "model_dump") else _tool_call_to_dict(tc) 
+                        tc.model_dump() if hasattr(tc, "model_dump") else _tool_call_to_dict(tc)
                         for tc in tool_calls
                     ],
                 })
 
                 # Execute each tool call sequentially
                 for tc in tool_calls:
-                    name = (getattr(tc.function, "name", None) if hasattr(tc, "function") 
+                    name = (getattr(tc.function, "name", None) if hasattr(tc, "function")
                            else tc.get("function", {}).get("name"))
-                    arg_str = (getattr(tc.function, "arguments", "{}") if hasattr(tc, "function") 
+                    arg_str = (getattr(tc.function, "arguments", "{}") if hasattr(tc, "function")
                               else tc.get("function", {}).get("arguments", "{}"))
                     args = self._safe_json_loads(arg_str)
 
                     logger.info("Executing tool %s with args: %s", name, args)
                     result = self._dispatch_tool(
-                        user_id=user_id, 
+                        user_id=user_id,
                         conversation_id=conversation_id,
-                        tool_name=name, 
-                        args=args, 
+                        tool_name=name,
+                        args=args,
                         intent=intent
                     )
 
                     # Append tool result message
-                    tool_call_id = (getattr(tc, "id", None) if hasattr(tc, "id") 
+                    tool_call_id = (getattr(tc, "id", None) if hasattr(tc, "id")
                                    else tc.get("id"))
                     messages.append({
                         "role": "tool",
@@ -461,7 +461,7 @@ class ReActBrain:
                         "name": name,
                         "content": json.dumps(result, ensure_ascii=False),
                     })
-                
+
                 # Continue loop to let model observe tool outputs
                 continue
 
@@ -474,7 +474,7 @@ class ReActBrain:
         logger.warning("ReActBrain reached max_reasoning_steps=%s; forcing finalization.", self.max_reasoning_steps)
         try:
             messages.append({
-                "role": "user", 
+                "role": "user",
                 "content": "Please provide your best final answer based on all tool results so far."
             })
             resp = self.client.chat.completions.create(
@@ -491,84 +491,102 @@ class ReActBrain:
     # ------------------------------------------------------------------
     # Tool dispatch + error safety
     def _dispatch_tool(
-    self, 
-    user_id: str, 
-    conversation_id: str,
-    tool_name: Optional[str], 
-    args: Dict[str, Any], 
-    intent: Dict[str, Any]
-) -> Dict[str, Any]:
-     """Execute a tool function with error handling."""
-     if not tool_name:
-        return {"success": False, "error": "Missing tool name."}
-    
-     fn = self.tool_mapping.get(tool_name)
-     if not fn:
-        return {"success": False, "error": f"Unknown tool: {tool_name}"}
+            self,
+            user_id: str,
+            conversation_id: str,
+            tool_name: Optional[str],
+            args: Dict[str, Any],
+            intent: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute a tool function with error handling."""
+        if not tool_name:
+            return {"success": False, "error": "Missing tool name."}
 
-    # CRITICAL FIX: Always override user_id from the authenticated user
-    # The model may hallucinate or provide incorrect user_id values
-     args["user_id"] = user_id  # Force override, don't check if it exists
-    
-    # Log the override for debugging
-     if "user_id" in args and args["user_id"] != user_id:
-        logger.warning("Model provided incorrect user_id, overriding with authenticated user: %s", user_id)
+        fn = self.tool_mapping.get(tool_name)
+        if not fn:
+            return {"success": False, "error": f"Unknown tool: {tool_name}"}
 
-    # Augment args with intent defaults if missing
-     if "platform" not in args and intent.get("platform") is not None:
-        args["platform"] = intent["platform"]
-     if "mime_type" not in args and intent.get("mime_type") is not None:
-        args["mime_type"] = intent["mime_type"]
+        # CRITICAL FIX: Always override user_id from the authenticated user
+        # The model may hallucinate or provide incorrect user_id values
+        args["user_id"] = user_id  # Force override, don't check if it exists
 
-    # Tool-specific argument handling
-     if tool_name == "summarize" and "summary_type" not in args and intent.get("summary_type"):
-        args["summary_type"] = intent["summary_type"]
+        # Log the override for debugging
+        if "user_id" in args and args["user_id"] != user_id:
+            logger.warning("Model provided incorrect user_id, overriding with authenticated user: %s", user_id)
 
-    # Ensure query_text is provided
-     if "query_text" not in args:
-        args["query_text"] = intent.get("query_text") or ""
+        # Augment args with intent defaults if missing
+        if "platform" not in args and intent.get("platform") is not None:
+            args["platform"] = intent["platform"]
+        if "mime_type" not in args and intent.get("mime_type") is not None:
+            args["mime_type"] = intent["mime_type"]
 
-     try:
-        # Call the tool function
-        result = fn(args)
-        if result is None:
-            result = {"message": "No results found."}
-        
-        wrapped_result = {
-            "success": True, 
-            "function": tool_name, 
-            "result": result
-        }
-        
-        # Store tool result as a separate conversation entry for context
-        self._store_tool_result(user_id, conversation_id, tool_name, result)
-        
-        return wrapped_result
-        
-     except TypeError as te:
-        logger.warning("Tool %s arg mismatch: %s; retrying with minimal args.", tool_name, te)
+        # Tool-specific argument handling
+        if tool_name == "summarize":
+            # Add required action field for summarize tool
+            args["action"] = "summarize"
+            if "summary_type" not in args and intent.get("summary_type"):
+                args["summary_type"] = intent["summary_type"]
+
+        # For RAG tool, ensure we have the query_text
+        if tool_name == "rag":
+            args["action"] = "rag"  # Add action field if needed by RAG module
+
+        # Ensure query_text is provided for tools that need it
+        if "query_text" not in args:
+            args["query_text"] = intent.get("query_text") or ""
+
         try:
-            # Retry with minimal args - ENSURE user_id is correct here too
-            minimal_args = {
-                "query_text": args.get("query_text", ""),
-                "user_id": user_id  # Use authenticated user_id, not from args
-            }
-            result = fn(minimal_args)
+            # Call the tool function
+            result = fn(args)
+            if result is None:
+                result = {"message": "No results found."}
+
             wrapped_result = {
-                "success": True, 
-                "function": tool_name, 
+                "success": True,
+                "function": tool_name,
                 "result": result
             }
+
+            # Store tool result as a separate conversation entry for context
             self._store_tool_result(user_id, conversation_id, tool_name, result)
+
             return wrapped_result
+
+        except TypeError as te:
+            logger.warning("Tool %s arg mismatch: %s; retrying with minimal args.", tool_name, te)
+            try:
+                # Retry with minimal args - ENSURE user_id is correct here too
+                minimal_args = {
+                    "query_text": args.get("query_text", ""),
+                    "user_id": user_id  # Use authenticated user_id, not from args
+                }
+
+                # Add tool-specific required fields for minimal retry
+                if tool_name == "summarize":
+                    minimal_args["action"] = "summarize"
+                    if "file_id" in args:
+                        minimal_args["file_id"] = args["file_id"]
+                    if "summary_type" in args:
+                        minimal_args["summary_type"] = args["summary_type"]
+                elif tool_name == "rag":
+                    minimal_args["action"] = "rag"
+
+                result = fn(minimal_args)
+                wrapped_result = {
+                    "success": True,
+                    "function": tool_name,
+                    "result": result
+                }
+                self._store_tool_result(user_id, conversation_id, tool_name, result)
+                return wrapped_result
+            except Exception as e:
+                logger.error("Tool %s retry failed: %s", tool_name, e)
+                logger.debug(traceback.format_exc())
+                return {"success": False, "function": tool_name, "error": str(e)}
         except Exception as e:
-            logger.error("Tool %s retry failed: %s", tool_name, e)
+            logger.error("Tool %s execution error: %s", tool_name, e)
             logger.debug(traceback.format_exc())
             return {"success": False, "function": tool_name, "error": str(e)}
-     except Exception as e:
-        logger.error("Tool %s execution error: %s", tool_name, e)
-        logger.debug(traceback.format_exc())
-        return {"success": False, "function": tool_name, "error": str(e)}
 
     def _store_tool_result(self, user_id: str, conversation_id: str, tool_name: str, result: Any) -> None:
         """Store tool execution result for context in future conversations."""
@@ -588,7 +606,7 @@ class ReActBrain:
             # Store as a system message for context using the same conversation_id
             # Generate a unique conversation_id for tool results to avoid confusion
             tool_conversation_id = f"{conversation_id}_tool_{tool_name}_{uuid.uuid4().hex[:8]}"
-            
+
             self.memory_manager.store_conversation(
                 user_id=user_id,
                 conversation_id=tool_conversation_id,
