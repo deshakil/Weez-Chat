@@ -41,31 +41,36 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Add trusted host middleware first
+# FIXED: TrustedHostMiddleware - only hostnames, no protocols
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*",  
+    allowed_hosts=[
+        "*",  # Allow all hosts for now
+        "weez.online",
+        "www.weez.online",
+        "chat-api-weez-cjfzftg4aedgg6h2.canadacentral-01.azurewebsites.net"
+    ]
+)
+
+# FIXED: Simplified CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
         "https://weez.online",
         "https://www.weez.online",
         "http://weez.online",
-        "http://www.weez.online"]  # In production, specify exact hosts
-)
-
-# Enhanced CORS middleware configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*", "https://www.weez.online",
-                   "https://weez.online",
-                   "http://weez.online",
-                   "http://www.weez.online",],
-    allow_credentials=False,  # Set to False to avoid complex CORS
+        "http://www.weez.online",
+        "http://localhost:5173",
+        "http://localhost:8080",
+    ],
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"],
-    max_age=3600,  # Cache preflight for 1 hour
+    max_age=3600,
 )
 
-# Initialize memory manager (you might want to use dependency injection in production)
+# Initialize memory manager
 memory_manager = CosmosMemoryManager()
 
 # Global flag to track brain initialization
