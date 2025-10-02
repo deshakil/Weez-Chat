@@ -42,15 +42,15 @@ app = FastAPI(
 )
 
 # FIXED: TrustedHostMiddleware - only hostnames, no protocols
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=[
-        "*",  # Allow all hosts for now
-        "weez.online",
-        "www.weez.online",
-        "chat-api-weez-cjfzftg4aedgg6h2.canadacentral-01.azurewebsites.net"
-    ]
-)
+#app.add_middleware(
+#    TrustedHostMiddleware,
+#    allowed_hosts=[
+#        "*",  # Allow all hosts for now
+#        "weez.online",
+#        "www.weez.online",
+#        "chat-api-weez-cjfzftg4aedgg6h2.canadacentral-01.azurewebsites.net"
+#    ]
+#)
 
 # FIXED: Simplified CORS configuration
 app.add_middleware(
