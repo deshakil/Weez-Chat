@@ -44,13 +44,20 @@ app = FastAPI(
 # Add trusted host middleware first
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"]  # In production, specify exact hosts
+    allowed_hosts=["*",  
+        "https://weez.online",
+        "https://www.weez.online",
+        "http://weez.online",
+        "http://www.weez.online"]  # In production, specify exact hosts
 )
 
 # Enhanced CORS middleware configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*", "https://www.weez.online",
+                   "https://weez.online",
+                   "http://weez.online",
+                   "http://www.weez.online",],
     allow_credentials=False,  # Set to False to avoid complex CORS
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
