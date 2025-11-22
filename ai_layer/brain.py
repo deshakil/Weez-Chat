@@ -112,13 +112,13 @@ class ReActBrain:
     """Reason + Act orchestration layer using Azure OpenAI function calling."""
 
     def __init__(
-        self,
-        azure_openai_client: AzureOpenAI,
-        chat_deployment: str,
-        memory_manager: Optional[CosmosMemoryManager] = None,
-        max_reasoning_steps: int = 5,
-        temperature: float = 0.1,
-        conversation_history_limit: int = 10,
+            self,
+            azure_openai_client: AzureOpenAI,
+            chat_deployment: str,
+            memory_manager: Optional[CosmosMemoryManager] = None,
+            max_reasoning_steps: int = 5,
+            temperature: float = 0.1,
+            conversation_history_limit: int = 10,
     ) -> None:
         self.client = azure_openai_client
         self.model = chat_deployment  # Azure deployment name
@@ -132,47 +132,6 @@ class ReActBrain:
 
     # ------------------------------------------------------------------
     # Public API
-    #def reason_and_act(self, user_id: str, user_input: str, conversation_id: Optional[str] = None) -> str:
-    #    """Main entry point. Returns final user-facing response string."""
-    #    logger.info("ReActBrain.start user=%s input=%s conversation_id=%s", user_id, user_input, conversation_id)
-
-    #    # Generate conversation_id if not provided
-    #    if not conversation_id:
-    #        conversation_id = str(uuid.uuid4())
-    #        logger.info("Generated new conversation_id: %s", conversation_id)
-
-    #    # Parse intent --------------------------------------------------
-    #    intent = self._safe_parse_intent(user_input)
-
-    #    # Clarification gate -------------------------------------------
-    #    if intent.get("needs_clarification"):
-    #        clarification_msg = self._clarification_message(intent)
-    #        # Store clarification request
-    #        self._store_conversation(user_id, conversation_id, user_input, clarification_msg)
-    #        return clarification_msg
-
-    #    # Generate embedding -----------------------------------
-    #    query_text = intent.get("query_text") or user_input
-    #    embedding = self._safe_get_embedding(query_text)
-
-    #    # Build context -------------------------------------------------
-    #    messages = self._build_conversation_messages(
-    #        user_id=user_id,
-    #        conversation_id=conversation_id,
-    #        user_input=user_input,
-    #        intent=intent,
-    #        embedding=embedding
-    #    )
-
-    #    # ReAct loop ----------------------------------------------------
-    #    reply = self._react_loop(user_id=user_id, conversation_id=conversation_id, messages=messages, intent=intent)
-
-    #    # Store the complete conversation in memory
-    #    self._store_conversation(user_id, conversation_id, user_input, reply)
-
-    #    return reply
-
-    # ALSO FIX: The main reason_and_act method
     def reason_and_act(self, user_id: str, user_input: str, conversation_id: Optional[str] = None) -> str:
         """Main entry point. Returns final user-facing response string."""
         logger.info("ReActBrain.start user=%s input=%s conversation_id=%s", user_id, user_input, conversation_id)
@@ -248,55 +207,6 @@ class ReActBrain:
             logger.debug(traceback.format_exc())
             return []
 
-    #def _build_conversation_messages(
-    #    self,
-    #    user_id: str,
-    #    conversation_id: str,
-    #    user_input: str,
-    #    intent: Dict[str, Any],
-    #    embedding: List[float]
-    #) -> List[Dict[str, Any]]:
-    #    """Build conversation messages including system prompt and conversation history."""
-    #    messages: List[Dict[str, Any]] = []
-
-    #    # Add system prompt
-    #    messages.append({
-    #        "role": "system",
-    #        "content": self._system_prompt(intent=intent, embedding=embedding)
-    #    })
-
-    #    # Get conversation history from Cosmos DB for this specific conversation
-    #    try:
-    #        history = self.memory_manager.get_conversation_history(
-    #            user_id=user_id,
-    #            conversation_id=conversation_id,
-    #            limit=self.conversation_history_limit
-    #        )
-    #
-    #        # Convert Cosmos DB history to chat format
-    #        # History comes back in chronological order (ascending)
-    #        for conversation in history:
-    #            # Add user message
-    #            messages.append({
-    #                "role": "user",
-    #                "content": conversation.get("user_query", "")
-    #            })
-
-    #            # Add assistant response
-    #            messages.append({
-    #                "role": "assistant",
-    #                "content": conversation.get("agent_response", "")
-    #            })
-
-    #    except Exception as e:
-    #        logger.error("Failed to retrieve conversation history: %s", e)
-    #        logger.debug(traceback.format_exc())
-    #        # Continue without history if retrieval fails
-
-    #    # Add current user message
-    #    messages.append({"role": "user", "content": user_input})
-
-    #    return messages
     def _build_conversation_messages(
             self,
             user_id: str,
@@ -365,21 +275,31 @@ class ReActBrain:
             "Always consider the conversation context and refer back to previous messages when relevant. "
             "Think step-by-step: decide if you need to call a tool; if so, return a tool call. "
             "After tools return, synthesize a clear answer citing the tool results (do not hallucinate). "
-            "Be helpful, accurate, and maintain conversational continuity."
+            "Be helpful, accurate, and maintain conversational continuity.\n\n"
+
+            # CRITICAL FIX: Add explicit instructions for file reference handling
+            "IMPORTANT FILE HANDLING INSTRUCTIONS:\n"
+            "- When users refer to files with phrases like 'this file', 'the above file', 'that document', etc., "
+            "look for file_id values in recent search results from the conversation history.\n"
+            "- For summarization tasks, ALWAYS use the file_id parameter, never use filename or file_name.\n"
+            "- Search results contain file_id fields - extract these IDs when users want to act on specific files.\n"
+            "- If a user asks to summarize 'this file' or 'the above file', find the file_id from the most recent search results.\n"
+            "- Example: If search returned a file with 'file_id': 'abc123', use {'file_id': 'abc123'} for summarization.\n\n"
         )
 
         # Add lightweight context injection
         if intent:
-            prompt += f"\n\nIntent context: action={intent.get('action')}, query={intent.get('query_text')}"
+            prompt += f"Intent context: action={intent.get('action')}, query={intent.get('query_text')}"
             if intent.get('platform'):
                 prompt += f", platform={intent.get('platform')}"
             if intent.get('mime_type'):
                 prompt += f", mime_type={intent.get('mime_type')}"
+            prompt += "\n\n"
 
         if embedding:
-            prompt += f"\n\nEmbedding available (length: {len(embedding)}) for semantic search."
+            prompt += f"Embedding available (length: {len(embedding)}) for semantic search.\n\n"
 
-        prompt += "\n\nReturn responses in markdown format when appropriate."
+        prompt += "Return responses in markdown format when appropriate."
         return prompt
 
     def _store_conversation(self, user_id: str, conversation_id: str, user_query: str, agent_response: str) -> None:
@@ -400,7 +320,8 @@ class ReActBrain:
 
     # ------------------------------------------------------------------
     # Core ReAct loop w/ tool calling
-    def _react_loop(self, user_id: str, conversation_id: str, messages: List[Dict[str, Any]], intent: Dict[str, Any]) -> str:
+    def _react_loop(self, user_id: str, conversation_id: str, messages: List[Dict[str, Any]],
+                    intent: Dict[str, Any]) -> str:
         """Iteratively call the model; execute tool calls until done or step limit reached."""
         steps = 0
         while steps < self.max_reasoning_steps:
@@ -438,9 +359,9 @@ class ReActBrain:
                 # Execute each tool call sequentially
                 for tc in tool_calls:
                     name = (getattr(tc.function, "name", None) if hasattr(tc, "function")
-                           else tc.get("function", {}).get("name"))
+                            else tc.get("function", {}).get("name"))
                     arg_str = (getattr(tc.function, "arguments", "{}") if hasattr(tc, "function")
-                              else tc.get("function", {}).get("arguments", "{}"))
+                               else tc.get("function", {}).get("arguments", "{}"))
                     args = self._safe_json_loads(arg_str)
 
                     logger.info("Executing tool %s with args: %s", name, args)
@@ -449,12 +370,13 @@ class ReActBrain:
                         conversation_id=conversation_id,
                         tool_name=name,
                         args=args,
-                        intent=intent
+                        intent=intent,
+                        messages=messages  # CRITICAL: Pass messages for context extraction
                     )
 
                     # Append tool result message
                     tool_call_id = (getattr(tc, "id", None) if hasattr(tc, "id")
-                                   else tc.get("id"))
+                                    else tc.get("id"))
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call_id,
@@ -491,84 +413,327 @@ class ReActBrain:
     # ------------------------------------------------------------------
     # Tool dispatch + error safety
     def _dispatch_tool(
-    self,
-    user_id: str,
-    conversation_id: str,
-    tool_name: Optional[str],
-    args: Dict[str, Any],
-    intent: Dict[str, Any]
-) -> Dict[str, Any]:
-     """Execute a tool function with error handling."""
-     if not tool_name:
-        return {"success": False, "error": "Missing tool name."}
+            self,
+            user_id: str,
+            conversation_id: str,
+            tool_name: Optional[str],
+            args: Dict[str, Any],
+            intent: Dict[str, Any],
+            messages: List[Dict[str, Any]]  # Messages for context extraction
+    ) -> Dict[str, Any]:
+        """Execute a tool function with error handling and context-aware processing."""
+        if not tool_name:
+            return {"success": False, "error": "Missing tool name."}
 
-     fn = self.tool_mapping.get(tool_name)
-     if not fn:
-        return {"success": False, "error": f"Unknown tool: {tool_name}"}
+        fn = self.tool_mapping.get(tool_name)
+        if not fn:
+            return {"success": False, "error": f"Unknown tool: {tool_name}"}
 
-    # CRITICAL FIX: Always override user_id from the authenticated user
-    # The model may hallucinate or provide incorrect user_id values
-     args["user_id"] = user_id  # Force override, don't check if it exists
+        # CRITICAL FIX: Always override user_id from the authenticated user
+        # The model may hallucinate or provide incorrect user_id values
+        original_user_id = args.get("user_id")
+        args["user_id"] = user_id  # Force override with authenticated user
 
-    # Log the override for debugging
-     if "user_id" in args and args["user_id"] != user_id:
-        logger.warning("Model provided incorrect user_id, overriding with authenticated user: %s", user_id)
+        # Log the override for debugging if there was a mismatch
+        if original_user_id and original_user_id != user_id:
+            logger.warning("Model provided incorrect user_id '%s', overriding with authenticated user: %s",
+                           original_user_id, user_id)
 
-    # Augment args with intent defaults if missing
-     if "platform" not in args and intent.get("platform") is not None:
-        args["platform"] = intent["platform"]
-     if "mime_type" not in args and intent.get("mime_type") is not None:
-        args["mime_type"] = intent["mime_type"]
+        # Augment args with intent defaults if missing
+        if "platform" not in args and intent.get("platform") is not None:
+            args["platform"] = intent["platform"]
+        if "mime_type" not in args and intent.get("mime_type") is not None:
+            args["mime_type"] = intent["mime_type"]
 
-    # Tool-specific argument handling
-     if tool_name == "summarize" and "summary_type" not in args and intent.get("summary_type"):
-        args["summary_type"] = intent["summary_type"]
+        # Tool-specific argument handling
+        if tool_name == "summarize":
+            # CRITICAL FIX: Always resolve fileName to file_id before passing to tools
+            if not args.get("file_id"):
+                # First try to extract from recent search results in conversation
+                context_result = self._extract_file_id_from_context(messages)
 
-    # Ensure query_text is provided
-     if "query_text" not in args:
-        args["query_text"] = intent.get("query_text") or ""
+                if context_result:
+                    # Always check if it's a fileName and resolve it to file_id
+                    if self._looks_like_file_id(context_result):
+                        args["file_id"] = context_result
+                        logger.info(f"Using file_id directly from context: {context_result}")
+                    else:
+                        # It's a fileName - MUST resolve to file_id before proceeding
+                        logger.info(f"Context returned fileName: {context_result}, resolving to file_id...")
+                        resolved_file_id = self._resolve_filename_to_file_id(user_id, context_result)
+                        if resolved_file_id:
+                            args["file_id"] = resolved_file_id
+                            logger.info(
+                                f"✅ Successfully resolved fileName '{context_result}' to file_id: {resolved_file_id}")
+                        else:
+                            logger.error(f"❌ FAILED to resolve fileName '{context_result}' to file_id")
+                            return {
+                                "success": False,
+                                "function": tool_name,
+                                "error": f"Could not resolve fileName '{context_result}' to file_id. File may not exist or be accessible."
+                            }
+                else:
+                    # Fallback: Try filename-based resolution from direct args
+                    filename_candidates = [
+                        args.get("filename"),
+                        args.get("file_name"),
+                        args.get("fileName"),
+                        args.get("name")
+                    ]
 
-     try:
-        # Call the tool function
-        result = fn(args)
-        if result is None:
-            result = {"message": "No results found."}
+                    found_filename = None
+                    for candidate in filename_candidates:
+                        if candidate and isinstance(candidate, str) and candidate.strip():
+                            found_filename = candidate.strip()
+                            break
 
-        wrapped_result = {
-            "success": True,
-            "function": tool_name,
-            "result": result
-        }
+                    if found_filename:
+                        # MUST resolve filename to file_id
+                        logger.info(f"Attempting to resolve filename '{found_filename}' to file_id...")
+                        resolved_file_id = self._resolve_filename_to_file_id(user_id, found_filename)
+                        if resolved_file_id:
+                            args["file_id"] = resolved_file_id
+                            logger.info(
+                                f"✅ Successfully resolved filename '{found_filename}' to file_id: {resolved_file_id}")
+                        else:
+                            logger.error(f"❌ FAILED to resolve filename '{found_filename}' to file_id")
+                            return {
+                                "success": False,
+                                "function": tool_name,
+                                "error": f"Could not resolve filename '{found_filename}' to file_id. File may not exist or be accessible."
+                            }
 
-        # Store tool result as a separate conversation entry for context
-        self._store_tool_result(user_id, conversation_id, tool_name, result)
+            # At this point, args should ALWAYS have a valid file_id, never a fileName
+            if args.get("file_id") and not self._looks_like_file_id(args["file_id"]):
+                logger.error(f"❌ CRITICAL ERROR: About to pass fileName as file_id: {args['file_id']}")
+                return {
+                    "success": False,
+                    "function": tool_name,
+                    "error": f"Internal error: fileName '{args['file_id']}' was not properly resolved to file_id"
+                }
 
-        return wrapped_result
+            if "summary_type" not in args and intent.get("summary_type"):
+                args["summary_type"] = intent["summary_type"]
 
-     except TypeError as te:
-        logger.warning("Tool %s arg mismatch: %s; retrying with minimal args.", tool_name, te)
+            logger.info(f"Delegating summarization to tool_summarize with validated file_id: {args.get('file_id')}")
+
+        # Ensure query_text is provided for tools that need it
+        if "query_text" not in args and tool_name in ["search", "search_file", "rag"]:
+            args["query_text"] = intent.get("query_text") or ""
+
         try:
-            # Retry with minimal args - ENSURE user_id is correct here too
-            minimal_args = {
-                "query_text": args.get("query_text", ""),
-                "user_id": user_id  # Use authenticated user_id, not from args
-            }
-            result = fn(minimal_args)
+            # Call the tool function
+            result = fn(args)
+            if result is None:
+                result = {"message": "No results found."}
+
             wrapped_result = {
                 "success": True,
                 "function": tool_name,
                 "result": result
             }
+
+            # Store tool result as a separate conversation entry for context
             self._store_tool_result(user_id, conversation_id, tool_name, result)
+
             return wrapped_result
+
+        except TypeError as te:
+            logger.warning("Tool %s arg mismatch: %s; retrying with minimal args.", tool_name, te)
+            try:
+                # Retry with minimal args - ENSURE user_id is correct here too
+                minimal_args = {
+                    "query_text": args.get("query_text", ""),
+                    "user_id": user_id  # Use authenticated user_id, not from args
+                }
+
+                # For summarize, preserve key parameters in minimal args
+                if tool_name == "summarize":
+                    # Preserve all potential file identification parameters
+                    for key in ["file_id", "filename", "file_name", "fileName", "name"]:
+                        if key in args:
+                            minimal_args[key] = args[key]
+
+                    # Preserve summary configuration
+                    if "summary_type" in args:
+                        minimal_args["summary_type"] = args["summary_type"]
+                    if "platform" in args:
+                        minimal_args["platform"] = args["platform"]
+
+                result = fn(minimal_args)
+                wrapped_result = {
+                    "success": True,
+                    "function": tool_name,
+                    "result": result
+                }
+                self._store_tool_result(user_id, conversation_id, tool_name, result)
+                return wrapped_result
+
+            except Exception as e:
+                logger.error("Tool %s retry failed: %s", tool_name, e)
+                logger.debug(traceback.format_exc())
+                return {"success": False, "function": tool_name, "error": str(e)}
+
         except Exception as e:
-            logger.error("Tool %s retry failed: %s", tool_name, e)
+            logger.error("Tool %s execution error: %s", tool_name, e)
             logger.debug(traceback.format_exc())
             return {"success": False, "function": tool_name, "error": str(e)}
-     except Exception as e:
-        logger.error("Tool %s execution error: %s", tool_name, e)
-        logger.debug(traceback.format_exc())
-        return {"success": False, "function": tool_name, "error": str(e)}
+
+    def _extract_file_id_from_context(self, messages: List[Dict[str, Any]]) -> Optional[str]:
+        """
+        Extract file_id (NOT fileName) from recent search results in conversation context.
+        """
+        try:
+            logger.debug("Attempting to extract file_id from conversation context...")
+
+            # Look for the most recent search results
+            for i, message in enumerate(reversed(messages)):
+                if message.get("role") == "tool" and message.get("name") in ["search", "search_file"]:
+                    try:
+                        tool_content = json.loads(message.get("content", "{}"))
+
+                        if tool_content.get("success") and tool_content.get("result"):
+                            result = tool_content["result"]
+                            results = result.get("results", [])
+
+                            if results and len(results) > 0:
+                                first_result = results[0]
+
+                                # PRIORITIZE actual file_id fields
+                                for field_name in ["file_id", "fileId", "id", "document_id"]:
+                                    if field_name in first_result and first_result[field_name]:
+                                        potential_file_id = first_result[field_name]
+                                        if self._looks_like_file_id(potential_file_id):
+                                            logger.info(
+                                                f"✅ Found actual file_id in search results: {potential_file_id}")
+                                            return potential_file_id
+
+                                # FALLBACK: Return fileName only if no file_id found
+                                file_name = first_result.get("fileName")
+                                if file_name:
+                                    logger.info(f"No file_id found, returning fileName for resolution: {file_name}")
+                                    return file_name
+
+                    except (json.JSONDecodeError, KeyError, TypeError) as e:
+                        logger.debug(f"Could not parse tool content: {e}")
+                        continue
+
+            logger.debug("No file reference found in recent conversation context")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error extracting file reference from context: {e}", exc_info=True)
+            return None
+
+    def _extract_filename_from_context(self, messages: List[Dict[str, Any]]) -> Optional[str]:
+        """Extract filename from recent search results."""
+        try:
+            for message in reversed(messages):
+                if message.get("role") == "tool" and message.get("name") in ["search", "search_file"]:
+                    try:
+                        tool_content = json.loads(message.get("content", "{}"))
+                        if tool_content.get("success") and tool_content.get("result"):
+                            result = tool_content["result"]
+                            results = result.get("results", [])
+                            if results and len(results) > 0:
+                                first_result = results[0]
+                                filename = first_result.get("fileName")
+                                if filename:
+                                    return filename
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting filename from context: {e}")
+            return None
+
+    def _resolve_filename_to_file_id(self, user_id: str, filename: str) -> Optional[str]:
+        """
+        Resolve a filename to its file_id using search functionality.
+        MUST return actual file_id, never fileName.
+        """
+        try:
+            logger.info(f"🔍 Resolving filename '{filename}' to file_id for user {user_id}")
+
+            # Import search function
+            try:
+                from .search import search_files_by_name
+            except ImportError:
+                logger.error("Could not import search_files_by_name function")
+                return None
+
+            # Try exact match first, then partial match
+            search_strategies = [
+                {"exact_match": True, "limit": 1},
+                {"exact_match": False, "limit": 3}
+            ]
+
+            for strategy in search_strategies:
+                try:
+                    logger.debug(f"Trying search strategy: {strategy}")
+                    results = search_files_by_name(
+                        file_name=filename,
+                        user_id=user_id,
+                        **strategy
+                    )
+
+                    if results and len(results) > 0:
+                        for result in results:
+                            # Look for actual file_id in the result
+                            for field_name in ["file_id", "fileId", "id", "document_id"]:
+                                potential_file_id = result.get(field_name)
+                                if potential_file_id and self._looks_like_file_id(potential_file_id):
+                                    logger.info(f"✅ Successfully resolved '{filename}' to file_id: {potential_file_id}")
+                                    return potential_file_id
+
+                            # Log what we found for debugging
+                            logger.debug(f"Search result fields: {list(result.keys())}")
+
+                except Exception as strategy_error:
+                    logger.debug(f"Search strategy {strategy} failed: {strategy_error}")
+                    continue
+
+            logger.error(f"❌ Could not resolve filename '{filename}' to any valid file_id")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error resolving filename '{filename}' to file_id: {e}")
+            return None
+
+    def _looks_like_file_id(self, value: str) -> bool:
+        """
+        Check if a string looks like a file_id vs a fileName.
+        file_id should NOT have file extensions and should be long/UUID-like.
+        """
+        if not value or not isinstance(value, str):
+            return False
+
+        import re
+
+        # If it has common file extensions, it's definitely a fileName, not file_id
+        file_extension_pattern = r'\.(pdf|docx?|xlsx?|pptx?|txt|csv|png|jpg|jpeg)$'
+        if re.search(file_extension_pattern, value.lower()):
+            logger.debug(f"'{value}' has file extension - treating as fileName")
+            return False
+
+        # If it contains spaces or parentheses, likely a fileName
+        if ' ' in value or '(' in value or ')' in value:
+            logger.debug(f"'{value}' contains spaces/parentheses - treating as fileName")
+            return False
+
+        # UUID pattern (with or without hyphens)
+        uuid_pattern = r'^[a-fA-F0-9]{8}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{12}$'
+        if re.match(uuid_pattern, value):
+            logger.debug(f"'{value}' matches UUID pattern - treating as file_id")
+            return True
+
+        # Long alphanumeric string without spaces (likely file_id)
+        if len(value) > 15 and re.match(r'^[a-zA-Z0-9_\-\.]+$', value) and not re.search(r'[A-Z][a-z]', value):
+            logger.debug(f"'{value}' matches long ID pattern - treating as file_id")
+            return True
+
+        logger.debug(f"'{value}' does not match file_id patterns - treating as fileName")
+        return False
 
     def _store_tool_result(self, user_id: str, conversation_id: str, tool_name: str, result: Any) -> None:
         """Store tool execution result for context in future conversations."""
@@ -626,12 +791,12 @@ _brain_instance: Optional[ReActBrain] = None
 
 
 def initialize_brain(
-    azure_openai_client: AzureOpenAI,
-    chat_deployment: str = "gpt-4o",
-    memory_manager: Optional[CosmosMemoryManager] = None,
-    max_reasoning_steps: int = 5,
-    temperature: float = 0.1,
-    conversation_history_limit: int = 10,
+        azure_openai_client: AzureOpenAI,
+        chat_deployment: str = "gpt-4o",
+        memory_manager: Optional[CosmosMemoryManager] = None,
+        max_reasoning_steps: int = 5,
+        temperature: float = 0.1,
+        conversation_history_limit: int = 10,
 ) -> None:
     """Initialize the global ReAct brain instance."""
     global _brain_instance

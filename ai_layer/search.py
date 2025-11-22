@@ -811,73 +811,139 @@ def search_documents(intent: dict, top_k: int = 10) -> List[dict]:
 def search_by_file_id(file_id: str, user_id: str, query_text: str = "", top_k: int = 10) -> List[dict]:
     """
     Search within a specific document by file ID.
-    
+
     Performs vector search limited to chunks from a specific document,
     useful for exploring content within a known file.
-    
+
     Args:
         file_id: Unique identifier for the file
         user_id: User identifier for data isolation
         query_text: Optional query text for semantic search within the file
         top_k: Maximum number of results to return
-    
+
     Returns:
         List of enhanced document chunks from the specified file
-    
+
     Raises:
         SearchError: If file_id is invalid or search fails
     """
     if not file_id or not isinstance(file_id, str):
         raise SearchError("file_id must be a non-empty string")
-    
+
     if not user_id or not isinstance(user_id, str):
         raise SearchError("user_id must be a non-empty string")
-    
-    # Build intent for file-specific search
-    intent = {
-        'query_text': query_text if query_text else "content overview",
-        'user_id': user_id,
-        'file_id': file_id  # This will be handled specially
-    }
-    
+
     logger.info(f"Searching within file {file_id} for user {user_id}")
-    
+
     try:
-        # For file-specific search, we'll use a different approach
-        # since cosmos_client might not support file_id filtering directly
-        
-        # Generate embedding for query
-        query_embedding = get_embedding(intent['query_text'])
-        
-        # Build basic filters
-        filters = {'user_id': user_id}
-        
-        # Perform search and then filter results by file_id
-        raw_results = client.vector_search_cosmos(
-            embedding=query_embedding,
-            filters=filters,
-            top_k=top_k * 3  # Get more results to filter down
-        )
-        
-        # Filter results to only include chunks from the specified file
-        file_results = [
-            result for result in raw_results 
-            if result.get('file_id') == file_id or result.get('fileId') == file_id
+        # CRITICAL FIX: Use Cosmos DB direct query instead of vector search filtering
+        # The vector search filtering might not be working correctly for file_id
+
+        cosmos_client = create_cosmos_client()
+
+        # First, try to find any chunks from this file using direct Cosmos query
+        query = """
+            SELECT * FROM c 
+            WHERE c.user_id = @user_id 
+            AND (c.file_id = @file_id OR c.fileId = @file_id)
+            AND IS_DEFINED(c.text)
+        """
+
+        parameters = [
+            {"name": "@user_id", "value": user_id},
+            {"name": "@file_id", "value": file_id}
         ]
-        
-        # Limit to requested number
-        file_results = file_results[:top_k]
-        
-        if not file_results:
-            logger.warning(f"No chunks found for file_id: {file_id}")
+
+        # Execute direct query to find file chunks
+        direct_results = list(cosmos_client.container.query_items(
+            query=query,
+            parameters=parameters,
+            enable_cross_partition_query=True,
+            max_item_count=top_k * 2  # Get more than needed for filtering
+        ))
+
+        logger.info(f"Direct query found {len(direct_results)} chunks for file_id: {file_id}")
+
+        if not direct_results:
+            # Try alternative file_id patterns that might be stored
+            alt_patterns = [
+                file_id.replace('.pdf', ''),  # Remove extension
+                file_id.replace('_removed', ''),  # Remove _removed suffix
+                file_id.replace(' ', '_'),  # Space to underscore
+                file_id.replace('_', ' '),  # Underscore to space
+            ]
+
+            for alt_file_id in alt_patterns:
+                if alt_file_id != file_id:
+                    logger.info(f"Trying alternative file_id pattern: {alt_file_id}")
+                    alt_params = [
+                        {"name": "@user_id", "value": user_id},
+                        {"name": "@file_id", "value": alt_file_id}
+                    ]
+
+                    alt_results = list(cosmos_client.container.query_items(
+                        query=query,
+                        parameters=alt_params,
+                        enable_cross_partition_query=True,
+                        max_item_count=top_k * 2
+                    ))
+
+                    if alt_results:
+                        logger.info(f"Found {len(alt_results)} chunks with alternative file_id: {alt_file_id}")
+                        direct_results = alt_results
+                        break
+
+        if not direct_results:
+            logger.warning(f"No chunks found for any file_id patterns for: {file_id}")
             return []
-        
-        # Process results
+
+        # If we have a query_text, perform semantic search on the found chunks
+        if query_text.strip():
+            # Generate embedding for the query
+            query_embedding = get_embedding(query_text)
+
+            # Use vector search with the found chunks as a post-filter
+            raw_results = client.vector_search_cosmos(
+                embedding=query_embedding,
+                filters={'user_id': user_id},
+                top_k=top_k * 3  # Get more results to filter
+            )
+
+            # Filter vector results to only include chunks from our target file
+            file_results = []
+            target_chunk_ids = {result.get('id') for result in direct_results}
+
+            for result in raw_results:
+                if result.get('id') in target_chunk_ids:
+                    file_results.append(result)
+                    if len(file_results) >= top_k:
+                        break
+
+            if not file_results:
+                # Fallback: return direct results if vector search filtering fails
+                file_results = direct_results[:top_k]
+                # Add dummy similarity scores
+                for result in file_results:
+                    result['_similarity'] = 0.5
+        else:
+            # No query text - return all chunks from the file
+            file_results = direct_results[:top_k]
+            # Add dummy similarity scores for consistency
+            for result in file_results:
+                result['_similarity'] = 1.0
+
+        # Process results using the existing result processor
+        intent = {
+            'query_text': query_text or "file content",
+            'user_id': user_id,
+            'file_id': file_id
+        }
+
         enhanced_results = SearchResultProcessor.process_results(file_results, intent)
-        
+
         logger.info(f"Found {len(enhanced_results)} chunks in file {file_id}")
         return enhanced_results
-        
+
     except Exception as e:
         error_msg = f"Error searching file {file_id}: {str(e)}"
         logger.error(error_msg, exc_info=True)
@@ -1177,6 +1243,279 @@ def get_search_stats(user_id: str) -> dict:
         raise SearchError(error_msg) from e
 
 
+def search_files_by_name(file_name: str, user_id: str, platform: Optional[str] = None,
+                         exact_match: bool = False, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Search for files by name using exact or partial matching.
+
+    This function leverages the enhanced cosmos_client functionality for better
+    performance and relevance scoring.
+
+    Args:
+        file_name: Name of the file to search for (can be partial)
+        user_id: User ID to search within
+        platform: Optional platform filter
+        exact_match: Whether to perform exact match (True) or partial match (False)
+        limit: Maximum number of results to return
+
+    Returns:
+        List of matching file metadata with file_id, fileName, platform, and other details
+
+    Raises:
+        SearchError: If search fails
+    """
+    if not file_name or not isinstance(file_name, str):
+        raise SearchError("file_name must be a non-empty string")
+
+    if not user_id or not isinstance(user_id, str):
+        raise SearchError("user_id must be a non-empty string")
+
+    logger.info(f"Searching for files by name: '{file_name}' for user {user_id}")
+
+    try:
+        # Create cosmos client
+        cosmos_client = create_cosmos_client()
+
+        # Build filters for the enhanced cosmos_client function
+        filters = {}
+        if platform:
+            filters['platforms'] = [platform]
+
+        # Use the enhanced cosmos_client search_files_by_name function
+        results = cosmos_client.search_files_by_name(
+            file_name_query=file_name,
+            user_id=user_id,
+            exact_match=exact_match,
+            filters=filters if filters else None
+        )
+
+        # Limit results if needed (cosmos_client already limits to 50)
+        if len(results) > limit:
+            results = results[:limit]
+
+        # Enhance results for search.py compatibility
+        enhanced_results = []
+        for result in results:
+            enhanced_result = {
+                'file_id': result.get('file_id'),
+                'fileName': result.get('fileName'),
+                'platform': result.get('platform'),
+                'mime_type': result.get('mime_type'),
+                'created_at': result.get('created_at'),
+                'metadata': result.get('metadata', {}),
+                'file_category': result.get('file_type', 'Unknown'),
+                'chunk_count': result.get('chunk_count', 0),
+                'search_relevance': result.get('search_relevance', 1.0)
+            }
+            enhanced_results.append(enhanced_result)
+
+        logger.info(f"Found {len(enhanced_results)} files matching name '{file_name}'")
+        return enhanced_results
+
+    except Exception as e:
+        error_msg = f"Error searching files by name '{file_name}': {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise SearchError(error_msg) from e
+
+
+def search_files_by_name_advanced(file_name_query: str, user_id: str,
+                                  exact_match: bool = False,
+                                  include_fuzzy: bool = True,
+                                  filters: Optional[Dict[str, Any]] = None,
+                                  limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Advanced file name search combining exact, partial, and fuzzy matching.
+
+    This function provides the most comprehensive file name search by combining
+    multiple search strategies and returning ranked results.
+
+    Args:
+        file_name_query: File name or partial name to search for
+        user_id: User ID to search within
+        exact_match: If True, prioritize exact matches
+        include_fuzzy: If True, include fuzzy matching for better recall
+        filters: Additional filter criteria (platforms, file_types, time_range)
+        limit: Maximum number of results to return
+
+    Returns:
+        List of matching files ranked by relevance with enhanced metadata
+
+    Raises:
+        SearchError: If search fails
+    """
+    if not file_name_query or not isinstance(file_name_query, str):
+        raise SearchError("file_name_query must be a non-empty string")
+
+    if not user_id or not isinstance(user_id, str):
+        raise SearchError("user_id must be a non-empty string")
+
+    logger.info(f"Advanced file name search: '{file_name_query}' for user {user_id}")
+
+    try:
+        cosmos_client = create_cosmos_client()
+        all_results = {}  # Use dict to avoid duplicates by file_id
+
+        # Strategy 1: Exact match (if requested or as baseline)
+        if exact_match:
+            exact_results = cosmos_client.search_files_by_name(
+                file_name_query=file_name_query,
+                user_id=user_id,
+                exact_match=True,
+                filters=filters
+            )
+            for result in exact_results:
+                file_id = result.get('file_id')
+                if file_id:
+                    result['_search_strategy'] = 'exact_match'
+                    result['_boost_score'] = 1.0
+                    all_results[file_id] = result
+
+        # Strategy 2: Partial match
+        partial_results = cosmos_client.search_files_by_name(
+            file_name_query=file_name_query,
+            user_id=user_id,
+            exact_match=False,
+            filters=filters
+        )
+        for result in partial_results:
+            file_id = result.get('file_id')
+            if file_id and file_id not in all_results:
+                result['_search_strategy'] = 'partial_match'
+                result['_boost_score'] = 0.8
+                all_results[file_id] = result
+
+        # Strategy 3: Fuzzy matching (if enabled)
+        if include_fuzzy:
+            fuzzy_results = cosmos_client.search_files_by_name_fuzzy(
+                file_name_query=file_name_query,
+                user_id=user_id,
+                max_results=limit * 2,
+                min_relevance=0.2  # Lower threshold for more results
+            )
+            for result in fuzzy_results:
+                file_id = result.get('file_id')
+                if file_id and file_id not in all_results:
+                    result['_search_strategy'] = 'fuzzy_match'
+                    result['_boost_score'] = 0.6
+                    all_results[file_id] = result
+
+        # Convert back to list and calculate final scores
+        final_results = list(all_results.values())
+
+        # Calculate combined relevance score
+        for result in final_results:
+            base_relevance = result.get('search_relevance', 0.5)
+            boost_score = result.get('_boost_score', 0.5)
+
+            # Combine base relevance with strategy boost
+            final_score = (base_relevance * 0.7) + (boost_score * 0.3)
+            result['_final_relevance'] = final_score
+
+            # Add search metadata
+            result['_advanced_search_metadata'] = {
+                'strategy': result.get('_search_strategy', 'unknown'),
+                'base_relevance': base_relevance,
+                'boost_score': boost_score,
+                'final_score': final_score
+            }
+
+        # Sort by final relevance score and limit results
+        final_results.sort(key=lambda x: x.get('_final_relevance', 0), reverse=True)
+        final_results = final_results[:limit]
+
+        logger.info(f"Advanced search found {len(final_results)} files for '{file_name_query}'")
+        return final_results
+
+    except Exception as e:
+        error_msg = f"Error in advanced file name search '{file_name_query}': {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise SearchError(error_msg) from e
+
+
+def get_file_id_by_name(file_name: str, user_id: str, platform: Optional[str] = None) -> Optional[str]:
+    """
+    Get a file ID by its name for a specific user.
+
+    This is a convenience function that uses search_files_by_name but returns
+    only the file ID of the first matching file.
+
+    Args:
+        file_name: Name of the file to search for
+        user_id: User ID to search within
+        platform: Optional platform filter
+
+    Returns:
+        File ID if found, None otherwise
+    """
+    try:
+        results = search_files_by_name(file_name, user_id, platform, exact_match=True, limit=1)
+        if results:
+            return results[0]['file_id']
+
+        # If no exact match, try partial match
+        results = search_files_by_name(file_name, user_id, platform, exact_match=False, limit=1)
+        if results:
+            return results[0]['file_id']
+
+        return None
+    except SearchError:
+        return None
+    except Exception as e:
+        logger.error(f"Error getting file ID by name: {str(e)}")
+        return None
+
+
+def get_file_id_by_name_enhanced(file_name: str, user_id: str,
+                                 platform: Optional[str] = None,
+                                 confidence_threshold: float = 0.7) -> Optional[Dict[str, Any]]:
+    """
+    Enhanced version of get_file_id_by_name that returns match confidence and metadata.
+
+    Args:
+        file_name: Name of the file to search for
+        user_id: User ID to search within
+        platform: Optional platform filter
+        confidence_threshold: Minimum confidence score required for a match
+
+    Returns:
+        Dictionary with file_id, confidence score, and metadata if found, None otherwise
+    """
+    try:
+        # Build filters
+        filters = {}
+        if platform:
+            filters['platforms'] = [platform]
+
+        # Try advanced search
+        results = search_files_by_name_advanced(
+            file_name_query=file_name,
+            user_id=user_id,
+            exact_match=False,
+            include_fuzzy=True,
+            filters=filters if filters else None,
+            limit=1
+        )
+
+        if results:
+            result = results[0]
+            confidence = result.get('_final_relevance', 0.0)
+
+            if confidence >= confidence_threshold:
+                return {
+                    'file_id': result.get('file_id'),
+                    'fileName': result.get('fileName'),
+                    'confidence': confidence,
+                    'strategy': result.get('_search_strategy', 'unknown'),
+                    'platform': result.get('platform'),
+                    'metadata': result.get('metadata', {})
+                }
+
+        return None
+
+    except Exception as e:
+        logger.error(f"Error getting file ID by name: {str(e)}")
+        return None
+
 # Utility functions for external integrations
 
 def validate_search_intent(intent: dict) -> tuple[bool, str]:
@@ -1233,7 +1572,9 @@ __all__ = [
     'create_search_intent',
     'SearchError',
     'Platform',
-    'FileCategory'
+    'FileCategory',
+    'search_files_by_name',  # Add this
+    'get_file_id_by_name'
 ]
 
 

@@ -386,6 +386,302 @@ class CosmosVectorClient:
             logger.error(f"Error during hybrid search: {str(e)}")
             return []
 
+    # Add to CosmosVectorClient class in cosmos_client.py
+    def search_files_by_name(self, file_name_query: str, user_id: str,
+                             exact_match: bool = False, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Search files by fileName with flexible matching options
+
+        Args:
+            file_name_query: File name or partial name to search for
+            user_id: User ID (required for partition key efficiency)
+            exact_match: If True, performs exact match; if False, performs partial/fuzzy match
+            filters: Additional filter criteria:
+                - platforms: list of strings (e.g., ["google_drive", "local"])
+                - file_types: list of strings (e.g., ["PDF", "DOCX"])
+                - time_range: ISO8601 string for created_at >= filtering
+
+        Returns:
+            List of matching file documents with metadata
+        """
+        try:
+            if not file_name_query or not file_name_query.strip():
+                raise ValueError("file_name_query cannot be empty")
+
+            if not user_id or not user_id.strip():
+                raise ValueError("user_id is required and cannot be empty")
+
+            logger.info(f"Searching files by name: '{file_name_query}' for user: {user_id}")
+
+            # Initialize conditions and parameters
+            conditions = ["c.user_id = @user_id"]
+            parameters = [{"name": "@user_id", "value": user_id}]
+
+            # File name matching condition
+            if exact_match:
+                conditions.append("c.fileName = @file_name")
+                parameters.append({"name": "@file_name", "value": file_name_query})
+            else:
+                # Case-insensitive partial matching
+                conditions.append("CONTAINS(UPPER(c.fileName), UPPER(@file_name))")
+                parameters.append({"name": "@file_name", "value": file_name_query.strip()})
+
+            # Apply additional filters if provided
+            if filters:
+                additional_conditions, additional_parameters = self._build_additional_filters(filters)
+                conditions.extend(additional_conditions)
+                parameters.extend(additional_parameters)
+
+            # Ensure we're only getting file documents (not chunks)
+            conditions.append("IS_DEFINED(c.fileName)")
+            conditions.append("IS_DEFINED(c.id)")
+
+            where_clause = " AND ".join(conditions)
+
+            # Query to get distinct files with aggregated information
+            query = f"""
+                SELECT DISTINCT
+                    c.id,
+                    c.fileName,
+                    c.platform,
+                    c.mime_type,
+                    c.created_at,
+                    c.metadata,
+                    COUNT(1) as chunk_count
+                FROM c
+                WHERE {where_clause}
+                GROUP BY c.id, c.fileName, c.platform, c.mime_type, c.created_at, c.metadata
+                ORDER BY c.created_at DESC
+            """
+
+            logger.info(f"Executing file search query with {len(parameters)} parameters")
+            logger.debug(f"Query: {query}")
+
+            results = list(self.container.query_items(
+                query=query,
+                parameters=parameters,
+                partition_key=user_id,
+                max_item_count=50  # Reasonable limit for file listings
+            ))
+
+            # Process and enhance results
+            processed_results = []
+            for item in results:
+                # Get file size and additional metadata if available
+                file_info = {
+                    'file_id': item.get('id'),
+                    #'fileName': item.get('fileName'),
+                    #platform': item.get('platform'),
+                    #'mime_type': item.get('mime_type'),
+                    #'created_at': item.get('created_at'),
+                    #'chunk_count': item.get('chunk_count', 0),
+                    #'metadata': item.get('metadata', {}),
+                    #'file_type': self._get_file_type_from_mime(item.get('mime_type', '')),
+                    #'search_relevance': self._calculate_name_relevance(file_name_query, item.get('fileName', ''))
+                }
+
+                processed_results.append(file_info)
+
+            # Sort by relevance for partial matches
+            if not exact_match:
+                processed_results.sort(key=lambda x: x['search_relevance'], reverse=True)
+
+            logger.info(f"File name search returned {len(processed_results)} results")
+            return processed_results
+
+        except ValueError as e:
+            logger.error(f"Invalid input for file name search: {str(e)}")
+            raise
+        except exceptions.CosmosHttpResponseError as e:
+            logger.error(f"Cosmos DB HTTP error during file search: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error during file name search: {str(e)}")
+            return []
+
+    def _build_additional_filters(self, filters: Dict[str, Any]) -> tuple:
+        """
+        Build additional filter conditions for file search
+
+        Args:
+            filters: Dictionary containing additional filter criteria
+
+        Returns:
+            Tuple of (conditions_list, parameters_list)
+        """
+        conditions = []
+        parameters = []
+
+        # Platform filter
+        if 'platforms' in filters and filters['platforms']:
+            platform_conditions = []
+            for i, platform in enumerate(filters['platforms']):
+                param_name = f"@platform_{i}"
+                platform_conditions.append(f"c.platform = {param_name}")
+                parameters.append({"name": param_name, "value": platform})
+
+            if platform_conditions:
+                conditions.append(f"({' OR '.join(platform_conditions)})")
+
+        # File type filter (converted to MIME types)
+        if 'file_types' in filters and filters['file_types']:
+            mime_conditions = []
+            for i, file_type in enumerate(filters['file_types']):
+                mime_type = self.file_type_mappings.get(file_type.upper())
+                if mime_type:
+                    param_name = f"@mime_type_{i}"
+                    mime_conditions.append(f"c.mime_type = {param_name}")
+                    parameters.append({"name": param_name, "value": mime_type})
+
+            if mime_conditions:
+                conditions.append(f"({' OR '.join(mime_conditions)})")
+
+        # Time range filter
+        if 'time_range' in filters and filters['time_range']:
+            try:
+                # Validate ISO8601 format
+                datetime.fromisoformat(filters['time_range'].replace('Z', '+00:00'))
+                conditions.append("c.created_at >= @time_range")
+                parameters.append({"name": "@time_range", "value": filters['time_range']})
+            except ValueError:
+                logger.warning(f"Invalid time_range format: {filters['time_range']}")
+
+        return conditions, parameters
+
+    def _get_file_type_from_mime(self, mime_type: str) -> str:
+        """
+        Get user-friendly file type from MIME type
+
+        Args:
+            mime_type: MIME type string
+
+        Returns:
+            User-friendly file type
+        """
+        mime_to_type = {
+            'application/pdf': 'PDF',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'DOCX',
+            'application/msword': 'DOC',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'XLSX',
+            'application/vnd.ms-excel': 'XLS',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'PPTX',
+            'application/vnd.ms-powerpoint': 'PPT',
+            'text/plain': 'TXT'
+        }
+
+        return mime_to_type.get(mime_type, 'Unknown')
+
+    def _calculate_name_relevance(self, query: str, file_name: str) -> float:
+        """
+        Calculate search relevance score for file name matching
+
+        Args:
+            query: Search query
+            file_name: File name to compare against
+
+        Returns:
+            Relevance score between 0.0 and 1.0
+        """
+        if not query or not file_name:
+            return 0.0
+
+        query_lower = query.lower().strip()
+        name_lower = file_name.lower()
+
+        # Exact match gets highest score
+        if query_lower == name_lower:
+            return 1.0
+
+        # File name starts with query gets high score
+        if name_lower.startswith(query_lower):
+            return 0.9
+
+        # Query is at the beginning of a word in the file name
+        if f" {query_lower}" in f" {name_lower}":
+            return 0.8
+
+        # File name contains the query
+        if query_lower in name_lower:
+            return 0.7
+
+        # Calculate similarity based on common words
+        query_words = set(query_lower.split())
+        name_words = set(name_lower.split())
+
+        if query_words and name_words:
+            common_words = query_words.intersection(name_words)
+            similarity = len(common_words) / len(query_words.union(name_words))
+            return similarity * 0.6  # Max score for word similarity
+
+        return 0.0
+
+    def search_files_by_name_fuzzy(self, file_name_query: str, user_id: str,
+                                   max_results: int = 10, min_relevance: float = 0.3) -> List[Dict[str, Any]]:
+        """
+        Advanced fuzzy search for files by name with relevance scoring
+
+        Args:
+            file_name_query: File name query
+            user_id: User ID
+            max_results: Maximum number of results to return
+            min_relevance: Minimum relevance score to include in results
+
+        Returns:
+            List of matching files sorted by relevance
+        """
+        try:
+            # First get all files for the user
+            all_files_query = """
+                SELECT DISTINCT
+                    c.file_id,
+                    c.fileName,
+                    c.platform,
+                    c.mime_type,
+                    c.created_at,
+                    c.metadata
+                FROM c
+                WHERE c.user_id = @user_id 
+                AND IS_DEFINED(c.fileName)
+                AND IS_DEFINED(c.file_id)
+            """
+
+            parameters = [{"name": "@user_id", "value": user_id}]
+
+            results = list(self.container.query_items(
+                query=all_files_query,
+                parameters=parameters,
+                partition_key=user_id
+            ))
+
+            # Calculate relevance for each file
+            scored_results = []
+            for item in results:
+                file_name = item.get('fileName', '')
+                relevance = self._calculate_name_relevance(file_name_query, file_name)
+
+                if relevance >= min_relevance:
+                    file_info = {
+                        'file_id': item.get('file_id'),
+                        'fileName': file_name,
+                        'platform': item.get('platform'),
+                        'mime_type': item.get('mime_type'),
+                        'created_at': item.get('created_at'),
+                        'metadata': item.get('metadata', {}),
+                        'file_type': self._get_file_type_from_mime(item.get('mime_type', '')),
+                        'search_relevance': relevance
+                    }
+                    scored_results.append(file_info)
+
+            # Sort by relevance and limit results
+            scored_results.sort(key=lambda x: x['search_relevance'], reverse=True)
+
+            logger.info(f"Fuzzy file search returned {len(scored_results[:max_results])} results")
+            return scored_results[:max_results]
+
+        except Exception as e:
+            logger.error(f"Error during fuzzy file name search: {str(e)}")
+            return []
+
     def get_user_statistics(self, user_id: str) -> Dict[str, Any]:
         """
         Get statistics about user's files and chunks
